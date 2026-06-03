@@ -4,6 +4,8 @@ import logging
 from datetime import date, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.error import BadRequest, RetryAfter
+import asyncio
 
 BOT_TOKEN = "8614524803:AAEbZ8fEaPps1j3wr09eCAa8eolvrF7nDxc"
 DATA_FILE = "/app/data.json"
@@ -15,6 +17,9 @@ MONTHS_RU = ["Январь","Февраль","Март","Апрель","Май",
              "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
 MONTHS_SHORT = ["Янв","Фев","Мар","Апр","Май","Июн",
                 "Июл","Авг","Сен","Окт","Ноя","Дек"]
+
+# Фиксированный текст — никогда не меняется, только клавиатура
+FIXED_TEXT = "📅 Трекер дней РФ 2026\n🟢 в РФ   🔴 не в РФ   ▪️ будущее"
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,7 +80,16 @@ def stats_text(absent: dict) -> str:
 
 def cal_keyboard(absent: dict, m: int) -> InlineKeyboardMarkup:
     today_str = TODAY.isoformat()
+    total = count_in_ru(absent)
+    remaining = max(0, GOAL - total)
     rows = []
+
+    # Счётчик вверху
+    rows.append([
+        InlineKeyboardButton(f"✅ {total}/183  ⏳ осталось {remaining}", callback_data="noop"),
+    ])
+
+    # Навигация по месяцам
     prev_m = 12 if m == 1 else m - 1
     next_m = 1 if m == 12 else m + 1
     rows.append([
@@ -83,7 +97,11 @@ def cal_keyboard(absent: dict, m: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(f"· {MONTHS_RU[m-1]} ·", callback_data="noop"),
         InlineKeyboardButton(f"{MONTHS_SHORT[next_m-1]} ▶", callback_data=f"m_{next_m}"),
     ])
+
+    # Дни недели
     rows.append([InlineKeyboardButton(d, callback_data="noop") for d in ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]])
+
+    # Дни месяца
     first_dow = date(YEAR, m, 1).weekday()
     row = [InlineKeyboardButton(" ", callback_data="noop")] * first_dow
     for d in range(1, dim(m) + 1):
@@ -106,32 +124,33 @@ def cal_keyboard(absent: dict, m: int) -> InlineKeyboardMarkup:
     if row:
         row += [InlineKeyboardButton(" ", callback_data="noop")] * (7 - len(row))
         rows.append(row)
+
+    # Кнопка статистики
     rows.append([
-        InlineKeyboardButton("📊 Статистика", callback_data="stats"),
-        InlineKeyboardButton("🔄 Обновить", callback_data=f"m_{m}"),
+        InlineKeyboardButton("📊 Подробная статистика", callback_data="stats"),
     ])
+
     return InlineKeyboardMarkup(rows)
 
-def cal_text(m: int) -> str:
-    return f"📅 *{MONTHS_RU[m-1]} {YEAR}*\n🟢 в РФ   🔴 не в РФ   ▪️ будущее"
-
-async def send_calendar(chat_id, m, absent, bot):
-    """Always send a fresh message — never edit, so state is always clear."""
-    await bot.send_message(
-        chat_id=chat_id,
-        text=cal_text(m),
-        parse_mode="Markdown",
-        reply_markup=cal_keyboard(absent, m)
-    )
+async def update_keyboard(query, m: int, absent: dict):
+    """Обновляем только клавиатуру — текст не трогаем."""
+    try:
+        await query.edit_message_reply_markup(reply_markup=cal_keyboard(absent, m))
+    except RetryAfter as e:
+        await asyncio.sleep(e.retry_after + 0.5)
+        try:
+            await query.edit_message_reply_markup(reply_markup=cal_keyboard(absent, m))
+        except Exception as ex:
+            logger.warning(f"retry failed: {ex}")
+    except BadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            logger.warning(f"update_keyboard: {e}")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     absent = load()
     await update.message.reply_text(
-        stats_text(absent),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📅 Открыть календарь", callback_data=f"m_{TODAY.month}")
-        ]])
+        FIXED_TEXT,
+        reply_markup=cal_keyboard(absent, TODAY.month)
     )
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -148,7 +167,6 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    chat_id = query.message.chat_id
 
     if data == "noop":
         return
@@ -157,18 +175,18 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "stats":
         await ctx.bot.send_message(
-            chat_id=chat_id,
+            chat_id=query.message.chat_id,
             text=stats_text(absent),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📅 Открыть календарь", callback_data=f"m_{TODAY.month}")
+                InlineKeyboardButton("◀ Назад к календарю", callback_data=f"m_{TODAY.month}")
             ]])
         )
         return
 
     if data.startswith("m_"):
         m = int(data[2:])
-        await send_calendar(chat_id, m, absent, ctx.bot)
+        await update_keyboard(query, m, absent)
         return
 
     if data.startswith("t_"):
@@ -177,8 +195,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         k = dkey(m, d)
         absent[k] = not absent.get(k, False)
         save(absent)
-        # Send fresh calendar so state is 100% clear
-        await send_calendar(chat_id, m, absent, ctx.bot)
+        await update_keyboard(query, m, absent)
         return
 
 def main():
