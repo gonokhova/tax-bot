@@ -92,13 +92,13 @@ def make_calendar_keyboard(absent, month):
         is_absent = absent.get(key, False)
         is_today = key == TODAY
         if is_future:
-            label = f"·{d}"
+            label = f"⬜{d}"
         elif is_absent:
-            label = f"✗{d}"
+            label = f"🔴{d}"
         elif is_today:
-            label = f"[{d}]"
+            label = f"🟢[{d}]"
         else:
-            label = f"✓{d}"
+            label = f"🟢{d}"
         cb = "noop" if is_future else f"toggle:{month}:{d}"
         row.append(InlineKeyboardButton(label, callback_data=cb))
         if len(row) == 7:
@@ -140,7 +140,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         month = int(data.split(":")[1])
         kb = make_calendar_keyboard(absent, month)
         try:
-            await query.edit_message_text(f"📅 *{MONTHS_RU[month-1]} {YEAR}*\n✓ в РФ  ✗ не в РФ  · будущее", parse_mode="Markdown", reply_markup=kb)
+            await query.edit_message_text(f"📅 *{MONTHS_RU[month-1]} {YEAR}*\n🟢 в РФ  🔴 не в РФ  ⬜ будущее", parse_mode="Markdown", reply_markup=kb)
         except:
             pass
         return
