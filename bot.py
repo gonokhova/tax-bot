@@ -112,7 +112,7 @@ def cal_keyboard(absent: dict, m: int) -> InlineKeyboardMarkup:
         is_absent = absent.get(k, False)
         if is_future:
             label = f"▪️{d}"
-            cb = "noop"
+            cb = f"t_{m}_{d}"
         elif is_absent:
             label = f"🔴{d}"
             cb = f"t_{m}_{d}"
