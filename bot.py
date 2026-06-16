@@ -6,9 +6,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import BadRequest, RetryAfter
 import asyncio
+import redis
 
 BOT_TOKEN = "8614524803:AAEbZ8fEaPps1j3wr09eCAa8eolvrF7nDxc"
-DATA_FILE = "/app/data.json"
+REDIS_URL = "rediss://default:gQAAAAAAAbWlAAIgcDEwYjYyODk2ZmIyMDY0YWZkYTMzZjY0M2QyZmM0OTYwOA@lucky-tapir-112037.upstash.io:6379"
+REDIS_KEY = "tax-absent-2026"
+
 GOAL = 183
 YEAR = 2026
 TODAY = date(2026, 6, 3)
@@ -18,24 +21,27 @@ MONTHS_RU = ["Январь","Февраль","Март","Апрель","Май",
 MONTHS_SHORT = ["Янв","Фев","Мар","Апр","Май","Июн",
                 "Июл","Авг","Сен","Окт","Ноя","Дек"]
 
-# Фиксированный текст — никогда не меняется, только клавиатура
 FIXED_TEXT = "📅 Трекер дней РФ 2026\n🟢 в РФ   🔴 не в РФ   ▪️ будущее"
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+rdb = redis.from_url(REDIS_URL, decode_responses=True)
+
 
 def load() -> dict:
     try:
-        with open(DATA_FILE) as f:
-            return json.load(f)
-    except Exception:
+        val = rdb.get(REDIS_KEY)
+        return json.loads(val) if val else {}
+    except Exception as e:
+        logger.error(f"Redis load error: {e}")
         return {}
 
 def save(data: dict):
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
+    try:
+        rdb.set(REDIS_KEY, json.dumps(data))
+    except Exception as e:
+        logger.error(f"Redis save error: {e}")
 
 def dim(m: int) -> int:
     if m == 12:
@@ -84,12 +90,10 @@ def cal_keyboard(absent: dict, m: int) -> InlineKeyboardMarkup:
     remaining = max(0, GOAL - total)
     rows = []
 
-    # Счётчик вверху
     rows.append([
-        InlineKeyboardButton(f"✅ {total}/183  ⏳ осталось {remaining}", callback_data="noop"),
+        InlineKeyboardButton(f"✅ {total}/183   ⏳ осталось {remaining}", callback_data="noop"),
     ])
 
-    # Навигация по месяцам
     prev_m = 12 if m == 1 else m - 1
     next_m = 1 if m == 12 else m + 1
     rows.append([
@@ -98,10 +102,8 @@ def cal_keyboard(absent: dict, m: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(f"{MONTHS_SHORT[next_m-1]} ▶", callback_data=f"m_{next_m}"),
     ])
 
-    # Дни недели
     rows.append([InlineKeyboardButton(d, callback_data="noop") for d in ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]])
 
-    # Дни месяца
     first_dow = date(YEAR, m, 1).weekday()
     row = [InlineKeyboardButton(" ", callback_data="noop")] * first_dow
     for d in range(1, dim(m) + 1):
@@ -125,15 +127,13 @@ def cal_keyboard(absent: dict, m: int) -> InlineKeyboardMarkup:
         row += [InlineKeyboardButton(" ", callback_data="noop")] * (7 - len(row))
         rows.append(row)
 
-    # Кнопка статистики
     rows.append([
-        InlineKeyboardButton("📊 Подробная статистика", callback_data="stats"),
+        InlineKeyboardButton("📊 Статистика", callback_data="stats"),
     ])
 
     return InlineKeyboardMarkup(rows)
 
 async def update_keyboard(query, m: int, absent: dict):
-    """Обновляем только клавиатуру — текст не трогаем."""
     try:
         await query.edit_message_reply_markup(reply_markup=cal_keyboard(absent, m))
     except RetryAfter as e:
